@@ -1,6 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const line = require('@line/bot-sdk');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
 // ===== 基本設定 =====
 const config = {
@@ -17,8 +20,20 @@ const TARGET_GROUP_IDS = (process.env.TARGET_GROUP_IDS || '')
   .map((s) => s.trim())
   .filter(Boolean);
 
+// 這個服務對外的網址，用來組成圖片/影片/檔案的公開下載連結。
+// Render 會自動提供 RENDER_EXTERNAL_URL，通常不用自己設定。
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+
 const client = new line.Client(config);
 const app = express();
+
+// 下載下來的圖片/影片/語音/檔案暫存在這裡，並用靜態路由對外提供下載連結
+const MEDIA_DIR = path.join(__dirname, 'media-storage');
+fs.mkdirSync(MEDIA_DIR, { recursive: true });
+app.use('/media', express.static(MEDIA_DIR));
+
+// 影片訊息需要一張預覽縮圖，這裡放一張固定的通用縮圖
+app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 // 健康檢查用（Render 會 ping 這個網址確認服務還活著）
 app.get('/', (_req, res) => res.send('LINE 轉發機器人運作中'));
@@ -48,7 +63,13 @@ async function handleEvent(event) {
   // 只轉發來自 A 群組的訊息
   if (!SOURCE_GROUP_ID || event.source.groupId !== SOURCE_GROUP_ID) return;
 
-  const forwardMessage = buildForwardMessage(event.message);
+  let forwardMessage;
+  try {
+    forwardMessage = await buildForwardMessage(event.message);
+  } catch (err) {
+    console.error('處理訊息內容失敗:', err);
+    forwardMessage = { type: 'text', text: '[轉發失敗：處理訊息時發生錯誤]' };
+  }
   if (!forwardMessage) return;
 
   if (TARGET_GROUP_IDS.length === 0) {
@@ -66,22 +87,66 @@ async function handleEvent(event) {
 }
 
 // 把 A 群組收到的訊息轉成要轉發的訊息物件
-function buildForwardMessage(message) {
+async function buildForwardMessage(message) {
   switch (message.type) {
     case 'text':
       return { type: 'text', text: message.text };
+
     case 'sticker':
       return { type: 'sticker', packageId: message.packageId, stickerId: message.stickerId };
-    case 'image':
-    case 'video':
-    case 'audio':
-    case 'file':
-      // 圖片/影片/語音/檔案目前不轉發實際內容，只提示收到（需要的話可以再擴充下載+重新上傳的邏輯）
-      return { type: 'text', text: `[收到一則 ${message.type} 訊息，暫不支援自動轉發此類型內容]` };
+
+    case 'image': {
+      const url = await downloadToPublicUrl(message.id, '.jpg');
+      if (!url) return { type: 'text', text: '[圖片轉發失敗，請稍後再試]' };
+      return { type: 'image', originalContentUrl: url, previewImageUrl: url };
+    }
+
+    case 'video': {
+      const url = await downloadToPublicUrl(message.id, '.mp4');
+      if (!url) return { type: 'text', text: '[影片轉發失敗，請稍後再試]' };
+      const previewUrl = PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}/assets/video-preview.jpg` : url;
+      return { type: 'video', originalContentUrl: url, previewImageUrl: previewUrl };
+    }
+
+    case 'audio': {
+      const url = await downloadToPublicUrl(message.id, '.m4a');
+      if (!url) return { type: 'text', text: '[語音轉發失敗，請稍後再試]' };
+      return { type: 'audio', originalContentUrl: url, duration: message.duration || 60000 };
+    }
+
+    case 'file': {
+      // LINE 沒有提供「檔案訊息」的推播類型（例如 PDF），所以改成轉發一個下載連結
+      const ext = path.extname(message.fileName || '') || '';
+      const url = await downloadToPublicUrl(message.id, ext);
+      if (!url) return { type: 'text', text: `[檔案轉發失敗：${message.fileName || '未知檔名'}]` };
+      return { type: 'text', text: `📎 ${message.fileName || '檔案'}\n${url}` };
+    }
+
     default:
       return null;
   }
 }
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`伺服器已啟動，監聽 port ${port}`));
+// 把 LINE 訊息內容下載下來、存到本機磁碟，回傳一個外部可以存取的網址
+async function downloadToPublicUrl(messageId, extension) {
+  if (!PUBLIC_BASE_URL) {
+    console.error('未設定 PUBLIC_BASE_URL / RENDER_EXTERNAL_URL，無法組出公開下載連結');
+    return null;
+  }
+  try {
+    const stream = await client.getMessageContent(messageId);
+    const filename = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}${extension}`;
+    const filePath = path.join(MEDIA_DIR, filename);
+
+    await new Promise((resolve, reject) => {
+      const writable = fs.createWriteStream(filePath);
+      stream.pipe(writable);
+      stream.on('error', reject);
+      writable.on('finish', resolve);
+      writable.on('error', reject);
+    });
+
+    return `${PUBLIC_BASE_URL}/media/${filename}`;
+  } catch (err) {
+    console.error('下載 LINE 媒體內容失敗:', err.originalError?.response?.data || err.message);
+    return
