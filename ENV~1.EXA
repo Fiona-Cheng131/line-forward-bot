@@ -1,0 +1,9 @@
+LINE_CHANNEL_ACCESS_TOKEN=你的_channel_access_token
+LINE_CHANNEL_SECRET=你的_channel_secret
+
+# A 群組的 group ID（訊息來源）
+SOURCE_GROUP_ID=
+
+# B、C、D、E、F 群組的 group ID，用逗號分隔，例如：
+# TARGET_GROUP_IDS=Cxxxxxxxx1,Cxxxxxxxx2,Cxxxxxxxx3,Cxxxxxxxx4,Cxxxxxxxx5
+TARGET_GROUP_IDS=

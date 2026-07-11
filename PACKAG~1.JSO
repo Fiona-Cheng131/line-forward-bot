@@ -1,0 +1,17 @@
+{
+  "name": "line-forward-bot",
+  "version": "1.0.0",
+  "description": "把 A 群組的訊息自動轉發到 B、C、D、E、F 群組的 LINE 機器人",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^8.4.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
